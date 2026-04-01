@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Virtual Environment
+venv/
+.env/
+.venv/
+
+# Environment Variables
+.env
+.env.local
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Mac / Linux / Windows
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Build
+build/
+dist/
+
+# Large Data Files
+*.csv
+*.parquet
+*.pkl
+
+# Matplotlib Cache
+.matplotlib/
+
+# TensorFlow Cache
+.keras/
+
+# OS Files
+AppData/
+anaconda3/
+OneDrive/
+Documents/
+Downloads/
+Pictures/
+Videos/
+Music/
+
+# Cache
+.cache/
+.pytest_cache/
+
+# FastAPI
+*.egg-info/
+
+# Local Prediction Outputs
+predictions/
