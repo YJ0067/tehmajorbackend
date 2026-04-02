@@ -122,25 +122,46 @@ def predict():
         import requests
 
         print("Loading assets inside /predict...")
-        assets = load_assets()
 
-        lats = assets["lats"]
-        lons = assets["lons"]
-        india_mask = assets["india_mask"]
-        region_id_grid = assets["region_id_grid"]
-        regions = assets["regions"]
-        H = assets["H"]
-        W = assets["W"]
-        model = assets["model"]
-        dyn_scaled = assets["dyn_scaled"]
-        date_maps = assets["date_maps"]
-        STATIC_SEQ = assets["STATIC_SEQ"]
-        time_idx = assets["time_idx"]
-        climatology = assets["climatology"]
+        print("Loading meta...")
+        meta = joblib.load(META_PATH)
 
-        print("Assets loaded successfully")
+        lats = meta["lats"]
+        lons = meta["lons"]
+        india_mask = meta["india_mask"]
+        region_id_grid = meta["region_id_grid"]
+        regions = meta["regions"]
+
+        H, W = india_mask.shape
+
+        print("Meta loaded successfully")
         print("Grid shape:", H, "x", W)
+
+        print("Loading model...")
+        model = load_model(
+            MODEL_PATH,
+            custom_objects={"TransposeBCHW": TransposeBCHW},
+            compile=False
+        )
+
+        print("Model loaded successfully")
         print("Model input shape:", model.input_shape)
+
+        print("Loading NPZ file...")
+        data = np.load(DATA_PATH, mmap_mode="r")
+
+        print("Creating references to dyn_scaled and date_maps...")
+        dyn_scaled_all = data["dyn_scaled"]
+        date_maps_all = data["date_maps"]
+        STATIC_SEQ = data["STATIC_SEQ"]
+
+        print("Loading time_idx...")
+        time_idx = pd.to_datetime(joblib.load(TIME_IDX_PATH))
+
+        print("Loading climatology...")
+        climatology = joblib.load(CLIM_PATH)
+
+        print("All assets loaded successfully")
 
         # =========================================================
         # USE TODAY'S DATE
@@ -173,30 +194,47 @@ def predict():
         # =========================================================
         hist = slice(idx - SEQ_LEN + 1, idx + 1)
 
-        X_dyn = dyn_scaled[hist]
-        X_date = date_maps[hist]
+        print("Loading only required history slice...")
+        X_dyn = dyn_scaled_all[hist]
+        X_date = date_maps_all[hist]
 
+        print("X_dyn shape:", X_dyn.shape)
+        print("X_date shape:", X_date.shape)
+        print("STATIC_SEQ shape:", STATIC_SEQ.shape)
+
+        print("Concatenating features...")
         X = np.concatenate(
             [X_dyn, X_date, STATIC_SEQ],
             axis=-1
         ).astype(np.float32)
+
+        print("Combined X shape:", X.shape)
 
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         X *= india_mask[None, :, :, None].astype(np.float32)
 
         X_input = X[None, ...]
 
+        print("Model input shape after batch dimension:", X_input.shape)
+
         # =========================================================
         # MODEL PREDICTION
         # =========================================================
+        print("Running model prediction...")
         pr_reg, pr_cls = model.predict(X_input, verbose=0)
+
+        print("Prediction complete")
 
         pr_reg = pr_reg[0, :, :, :, 0]
         pr_cls = pr_cls[0, :, :, :, 0]
 
+        print("pr_reg shape:", pr_reg.shape)
+        print("pr_cls shape:", pr_cls.shape)
+
         # =========================================================
         # HYBRID FORECAST
         # =========================================================
+        print("Generating hybrid predictions...")
         hybrid_preds = []
 
         for day in range(FORECAST_DAYS):
@@ -208,9 +246,12 @@ def predict():
 
         hybrid_preds = np.array(hybrid_preds)
 
+        print("Hybrid predictions shape:", hybrid_preds.shape)
+
         # =========================================================
         # CREATE RESPONSE DATA
         # =========================================================
+        print("Creating response rows...")
         rows = []
 
         for L in range(1, FORECAST_DAYS + 1):
@@ -244,6 +285,8 @@ def predict():
                         "hw_prob": round(hw_prob, 4)
                     })
 
+        print("Total rows created:", len(rows))
+
         payload = {
             "status": "success",
             "generated_at": str(TARGET_DATE.date()),
@@ -256,12 +299,15 @@ def predict():
         # =========================================================
         API_URL = "https://sharebro.onrender.com/api/forecast"
 
+        print("Sending payload to Sharebro...")
         sharebro_response = requests.post(
             API_URL,
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=60
         )
+
+        print("Sharebro response code:", sharebro_response.status_code)
 
         response = {
             "status": "success",
@@ -270,8 +316,10 @@ def predict():
             "payload": payload
         }
 
-        # Free memory after prediction
-        del assets, model, dyn_scaled, date_maps, STATIC_SEQ, time_idx, climatology, X, X_input, pr_reg, pr_cls, hybrid_preds, rows, payload
+        print("Cleaning memory...")
+        del model, data, dyn_scaled_all, date_maps_all, STATIC_SEQ
+        del X_dyn, X_date, X, X_input, pr_reg, pr_cls, hybrid_preds
+        del rows, payload, meta, time_idx, climatology
         gc.collect()
 
         return response
@@ -279,5 +327,6 @@ def predict():
     except HTTPException:
         raise
     except Exception as e:
+        print("ERROR:", str(e))
         gc.collect()
         raise HTTPException(status_code=500, detail=str(e))
