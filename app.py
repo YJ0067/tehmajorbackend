@@ -27,7 +27,7 @@ SEQ_LEN = 45
 FORECAST_DAYS = 7
 GRID_PROB_THRESH = 0.50
 
-BASE_PATH = r"C:\Users\USER\Desktop\backend\backend"
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_PATH = os.path.join(BASE_PATH, "heatwave_full_model.keras")
 META_PATH = os.path.join(BASE_PATH, "variables", "grid_region_terrain_mapping.joblib")
@@ -35,6 +35,12 @@ DATA_PATH = os.path.join(BASE_PATH, "variables2", "precomputed_arrays.npz")
 TIME_IDX_PATH = os.path.join(BASE_PATH, "variables2", "time_idx.joblib")
 CLIM_PATH = os.path.join(BASE_PATH, "variables", "climatology.joblib")
 
+print("BASE_PATH:", BASE_PATH)
+print("MODEL_PATH exists:", os.path.exists(MODEL_PATH))
+print("META_PATH exists:", os.path.exists(META_PATH))
+print("DATA_PATH exists:", os.path.exists(DATA_PATH))
+print("TIME_IDX_PATH exists:", os.path.exists(TIME_IDX_PATH))
+print("CLIM_PATH exists:", os.path.exists(CLIM_PATH))
 # =========================================================
 # No request body needed because API uses today's date automatically
 
