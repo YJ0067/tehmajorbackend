@@ -1,13 +1,15 @@
-
 import os
-import json
+import gc
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 import joblib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 from tensorflow.keras.models import load_model
 from datetime import datetime, timedelta
 
@@ -41,8 +43,6 @@ print("META_PATH exists:", os.path.exists(META_PATH))
 print("DATA_PATH exists:", os.path.exists(DATA_PATH))
 print("TIME_IDX_PATH exists:", os.path.exists(TIME_IDX_PATH))
 print("CLIM_PATH exists:", os.path.exists(CLIM_PATH))
-# =========================================================
-# No request body needed because API uses today's date automatically
 
 # =========================================================
 # CUSTOM LAYER
@@ -55,44 +55,51 @@ class TransposeBCHW(tf.keras.layers.Layer):
         return {}
 
 # =========================================================
-# LOAD MODEL + FILES ONCE
+# HELPERS
 # =========================================================
-print("Loading assets...")
+def load_assets():
+    meta = joblib.load(META_PATH)
 
-meta = joblib.load(META_PATH)
+    lats = meta["lats"]
+    lons = meta["lons"]
+    india_mask = meta["india_mask"]
+    region_id_grid = meta["region_id_grid"]
+    regions = meta["regions"]
 
-lats = meta["lats"]
-lons = meta["lons"]
-india_mask = meta["india_mask"]
-region_id_grid = meta["region_id_grid"]
-regions = meta["regions"]
+    H, W = india_mask.shape
 
-H, W = india_mask.shape
+    model = load_model(
+        MODEL_PATH,
+        custom_objects={"TransposeBCHW": TransposeBCHW},
+        compile=False
+    )
 
-print("Grid shape:", H, "x", W)
+    with np.load(DATA_PATH, allow_pickle=False) as data:
+        dyn_scaled = data["dyn_scaled"]
+        date_maps = data["date_maps"]
+        STATIC_SEQ = data["STATIC_SEQ"]
 
-model = load_model(
-    MODEL_PATH,
-    custom_objects={"TransposeBCHW": TransposeBCHW},
-    compile=False
-)
+    time_idx = pd.to_datetime(joblib.load(TIME_IDX_PATH))
+    climatology = joblib.load(CLIM_PATH)
 
-print("Model loaded successfully")
-print("Expected input shape:", model.input_shape)
-
-data = np.load(DATA_PATH)
-
-dyn_scaled = data["dyn_scaled"]
-date_maps = data["date_maps"]
-STATIC_SEQ = data["STATIC_SEQ"]
-
-time_idx = pd.to_datetime(joblib.load(TIME_IDX_PATH))
-climatology = joblib.load(CLIM_PATH)
-
-print("All assets loaded successfully")
+    return {
+        "lats": lats,
+        "lons": lons,
+        "india_mask": india_mask,
+        "region_id_grid": region_id_grid,
+        "regions": regions,
+        "H": H,
+        "W": W,
+        "model": model,
+        "dyn_scaled": dyn_scaled,
+        "date_maps": date_maps,
+        "STATIC_SEQ": STATIC_SEQ,
+        "time_idx": time_idx,
+        "climatology": climatology
+    }
 
 # =========================================================
-# HOME ROUTE
+# ROUTES
 # =========================================================
 @app.get("/")
 def home():
@@ -101,25 +108,39 @@ def home():
         "message": "Heatwave Forecast API is running"
     }
 
-# =========================================================
-# HEALTH ROUTE
-# =========================================================
 @app.get("/health")
 def health():
     return {
         "status": "healthy",
-        "model_loaded": True,
-        "grid_shape": [int(H), int(W)],
+        "message": "API is running",
         "forecast_days": FORECAST_DAYS
     }
 
-# =========================================================
-# PREDICTION ROUTE
-# =========================================================
 @app.get("/predict")
 def predict():
     try:
         import requests
+
+        print("Loading assets inside /predict...")
+        assets = load_assets()
+
+        lats = assets["lats"]
+        lons = assets["lons"]
+        india_mask = assets["india_mask"]
+        region_id_grid = assets["region_id_grid"]
+        regions = assets["regions"]
+        H = assets["H"]
+        W = assets["W"]
+        model = assets["model"]
+        dyn_scaled = assets["dyn_scaled"]
+        date_maps = assets["date_maps"]
+        STATIC_SEQ = assets["STATIC_SEQ"]
+        time_idx = assets["time_idx"]
+        climatology = assets["climatology"]
+
+        print("Assets loaded successfully")
+        print("Grid shape:", H, "x", W)
+        print("Model input shape:", model.input_shape)
 
         # =========================================================
         # USE TODAY'S DATE
@@ -133,10 +154,10 @@ def predict():
         # FIND DATE INDEX
         # =========================================================
         if TARGET_DATE not in time_idx.values:
-            idx = np.argmin(np.abs(time_idx - TARGET_DATE))
+            idx = int(np.argmin(np.abs(time_idx - TARGET_DATE)))
             print("Exact date not found. Using closest available date.")
         else:
-            idx = np.where(time_idx == TARGET_DATE)[0][0]
+            idx = int(np.where(time_idx == TARGET_DATE)[0][0])
 
         print("Using index:", idx)
         print("Matched date:", time_idx[idx])
@@ -144,7 +165,7 @@ def predict():
         if idx < SEQ_LEN:
             raise HTTPException(
                 status_code=400,
-                detail=f"Not enough history before {TARGET_DATE}"
+                detail=f"Not enough history before {TARGET_DATE.date()}"
             )
 
         # =========================================================
@@ -180,11 +201,9 @@ def predict():
 
         for day in range(FORECAST_DAYS):
             month = (TARGET_DATE + timedelta(days=day)).month
-
             base = climatology["clim_tmax"][month - 1]
             correction = pr_reg[day] * 0.3
             final = (base + correction) * india_mask
-
             hybrid_preds.append(final)
 
         hybrid_preds = np.array(hybrid_preds)
@@ -199,7 +218,6 @@ def predict():
 
             for h in range(H):
                 for w in range(W):
-
                     if india_mask[h, w] == 0:
                         continue
 
@@ -241,19 +259,25 @@ def predict():
         sharebro_response = requests.post(
             API_URL,
             json=payload,
-            headers={
-                "Content-Type": "application/json"
-            },
+            headers={"Content-Type": "application/json"},
             timeout=60
         )
 
-        return {
+        response = {
             "status": "success",
             "sharebro_status_code": sharebro_response.status_code,
             "sharebro_response": sharebro_response.text,
             "payload": payload
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Free memory after prediction
+        del assets, model, dyn_scaled, date_maps, STATIC_SEQ, time_idx, climatology, X, X_input, pr_reg, pr_cls, hybrid_preds, rows, payload
+        gc.collect()
 
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        gc.collect()
+        raise HTTPException(status_code=500, detail=str(e))
